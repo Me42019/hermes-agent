@@ -122,6 +122,10 @@ def get_archive_after_days() -> int:
     return _config_number("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS, int)
 
 
+def get_protect_after_uses() -> int:
+    return skill_usage.get_protect_after_uses()
+
+
 def get_consolidate() -> bool:
     """LLM consolidation pass — OFF by default (prune only, no aux-model fork); ``hermes curator run --consolidate`` overrides per invocation."""
     return bool(_load_config().get("consolidate", DEFAULT_CONSOLIDATE))
@@ -197,7 +201,15 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
     # Cron-referenced skills are in use by definition (usage only bumps when a
     # job fires, so paused/rare jobs would age them out). Treat as pinned.
     protected = _cron_referenced_skills()
-    counts = {"marked_stale": 0, "archived": 0, "reactivated": 0, "checked": 0, "seeded": 0}
+    protect_after_uses = get_protect_after_uses()
+    counts = {
+        "marked_stale": 0,
+        "archived": 0,
+        "reactivated": 0,
+        "checked": 0,
+        "seeded": 0,
+        "protected_by_use": 0,
+    }
 
     def _set(name: str, state: str, key: str) -> None:
         _u.set_state(name, state)
@@ -208,6 +220,19 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
         name = row["name"]
         if row.get("pinned") or name in protected:
             continue
+
+        try:
+            use_count = max(0, int(row.get("use_count", 0) or 0))
+        except (TypeError, ValueError):
+            use_count = 0
+
+        # Repeated genuine loads are positive evidence that this skill matters.
+        # Once it crosses the configured threshold, automatic lifecycle
+        # transitions leave it alone. Explicit user archival remains available.
+        if protect_after_uses > 0 and use_count >= protect_after_uses:
+            counts["protected_by_use"] += 1
+            continue
+
         # First sight with no persisted record: anchor its clock to now and defer.
         if not row.get("_persisted", True):
             _u.seed_record_if_missing(name)

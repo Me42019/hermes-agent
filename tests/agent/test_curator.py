@@ -1062,3 +1062,21 @@ def test_review_fork_seeds_shared_read_marks(curator_env, monkeypatch):
         "run_conversation, or every copied tool-worker context keeps private "
         "marks and the read-before-write guard refuses all patches"
     )
+
+def test_proven_use_skill_never_auto_stales_or_archives(curator_env, monkeypatch):
+    c = curator_env["curator"]
+    u = curator_env["usage"]
+    skills_dir = curator_env["home"] / "skills"
+
+    _write_skill(skills_dir, "proven-use")
+    _backdate(u, "proven-use", 365, use_count=5)
+
+    monkeypatch.setattr(c, "get_protect_after_uses", lambda: 5)
+
+    counts = c.apply_automatic_transitions()
+
+    assert counts["protected_by_use"] == 1
+    assert counts["marked_stale"] == 0
+    assert counts["archived"] == 0
+    assert u.get_record("proven-use")["state"] == u.STATE_ACTIVE
+    assert (skills_dir / "proven-use").exists()

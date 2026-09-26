@@ -95,6 +95,10 @@ def _print_curator_config(curator) -> None:
     print(f"  interval:       every {f'{ih // 24}d' if ih % 24 == 0 and ih >= 24 else f'{ih}h'}")
     print(f"  stale after:    {curator.get_stale_after_days()}d unused")
     print(f"  archive after:  {curator.get_archive_after_days()}d unused")
+    protect = curator.get_protect_after_uses()
+    print(
+        f"  use protection: {'off' if protect <= 0 else f'{protect}+ genuine uses = no auto-archive'}"
+    )
     consolidate = curator.get_consolidate()
     print(
         f"  consolidate:    {'on' if consolidate else 'off'}"

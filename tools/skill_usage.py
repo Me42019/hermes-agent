@@ -34,6 +34,10 @@ except ImportError:  # pragma: no cover - platform-specific fallback
 STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED = "active", "stale", "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
+# Profile-configurable safety rail. Zero preserves upstream behavior unless
+# explicitly enabled by the user.
+DEFAULT_PROTECT_AFTER_USES = 0
+
 # Load-bearing built-ins (by frontmatter ``name``) the curator must NEVER archive/consolidate regardless of
 # ``curator.prune_builtins``, pins or LLM judgment — archiving one breaks its slash command. Keep tiny.
 PROTECTED_BUILTIN_SKILLS: Set[str] = set()
@@ -189,6 +193,23 @@ def _prune_builtins_enabled() -> bool:
     except Exception as e:  # pragma: no cover — best-effort config read
         logger.debug("Failed to read curator.prune_builtins: %s", e)
         return False
+
+
+def get_protect_after_uses() -> int:
+    """Number of genuine skill loads after which non-user archival is refused.
+
+    Zero disables the protection. This is intentionally based on use_count,
+    not aggregate activity_count.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        cur = cfg.get("curator") if isinstance(cfg, dict) else None
+        raw = cur.get("protect_after_uses", DEFAULT_PROTECT_AFTER_USES) if isinstance(cur, dict) else DEFAULT_PROTECT_AFTER_USES
+        return max(0, int(raw or 0))
+    except Exception as e:
+        logger.debug("Failed to read curator.protect_after_uses: %s", e)
+        return DEFAULT_PROTECT_AFTER_USES
 
 
 def read_suppressed_names() -> Set[str]:
@@ -616,8 +637,37 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
 
 
 def archive_skill(skill_name: str) -> Tuple[bool, str]:
-    """Move a curator-eligible skill dir to ``.archive/`` (flattened; timestamp suffix on collision). Never hub;
-    bundled built-ins only with ``curator.prune_builtins`` (and then suppressed from re-seeding)."""
+    """Move a curator-eligible skill dir to ``.archive/``.
+
+    Pinned skills are never archived. When curator.protect_after_uses is set,
+    non-user archive paths also refuse to remove a skill that has demonstrated
+    repeated real use. An explicit ``hermes curator archive`` command is the
+    manual override for the usage threshold.
+    """
+    record = get_record(skill_name)
+
+    if record.get("pinned"):
+        return False, (
+            f"skill '{skill_name}' is pinned; unpin it explicitly before archiving"
+        )
+
+    actor = "agent"
+    try:
+        from tools import skill_ledger
+        actor = skill_ledger.derive_actor()
+    except Exception:
+        pass
+
+    protect_after = get_protect_after_uses()
+    uses = _non_negative_int(record.get("use_count"))
+
+    if actor != "user" and protect_after > 0 and uses >= protect_after:
+        return False, (
+            f"skill '{skill_name}' has {uses} recorded uses and is protected "
+            f"from automatic/agent archival (threshold: {protect_after}). "
+            f"Use `hermes curator archive {skill_name}` for an explicit manual archive."
+        )
+
     skill_dir = _find_skill_dir(skill_name)
     if skill_dir is None and _find_external_skill_dir(skill_name) is not None:
         return False, _external_read_only_message(skill_name)

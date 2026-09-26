@@ -180,3 +180,17 @@ def test_unreadable_memory_file_is_refused_unchanged(home):
 
     assert not res["ok"] and "could not be read" in res["message"]
     assert path.read_bytes() == b"alpha note\n\xc3\x28\n\xc2\xa7\nbeta"
+
+def test_journey_delete_refuses_proven_use_skill(home, monkeypatch):
+    from tools import skill_usage
+
+    for _ in range(5):
+        skill_usage.bump_use("my-skill")
+
+    monkeypatch.setattr(skill_usage, "get_protect_after_uses", lambda: 5)
+
+    res = lm.delete_node("my-skill")
+
+    assert not res["ok"]
+    assert "protected" in res["message"]
+    assert (home / "skills" / "my-skill").exists()

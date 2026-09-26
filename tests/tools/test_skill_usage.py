@@ -613,3 +613,33 @@ def test_skill_file_lock_is_reentrant_in_thread_and_exclusive_across_threads(tmp
         assert not other_done.wait(timeout=0.2), "second thread acquired a held lock"
     t.join(timeout=2)
     assert entered.is_set() and other_done.is_set()
+
+def test_reused_skill_is_protected_from_agent_archive_but_user_can_override(
+    skills_home, monkeypatch
+):
+    from tools import skill_ledger, skill_usage
+
+    skills_dir = skills_home / "skills"
+    _write_skill(skills_dir, "proven-use")
+
+    data = skill_usage.load_usage()
+    data["proven-use"] = skill_usage._empty_record()
+    data["proven-use"]["use_count"] = 5
+    skill_usage.save_usage(data)
+
+    monkeypatch.setattr(skill_usage, "get_protect_after_uses", lambda: 5)
+
+    ok, msg = skill_usage.archive_skill("proven-use")
+    assert ok is False
+    assert "5 recorded uses" in msg
+    assert (skills_dir / "proven-use").exists()
+
+    token = skill_ledger.set_ledger_actor("user")
+    try:
+        ok, msg = skill_usage.archive_skill("proven-use")
+    finally:
+        skill_ledger.reset_ledger_actor(token)
+
+    assert ok is True
+    assert not (skills_dir / "proven-use").exists()
+    assert (skills_dir / ".archive" / "proven-use").exists()
