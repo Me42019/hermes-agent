@@ -921,9 +921,7 @@ class TestMaxIterationsSummaryReplay:
             {"role": "user", "content": "q1", "api_content": "q1\n\nPLUGIN-CTX"},
             {"role": "assistant", "content": "a1"},
         ]
-        with patch.object(
-            agent, "_ensure_primary_openai_client", return_value=client
-        ):
+        with patch.object(agent, "_create_request_openai_client", return_value=client):
             out = handle_max_iterations(agent, messages, 5)
 
         assert out == "SUMMARY"

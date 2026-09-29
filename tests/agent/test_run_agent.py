@@ -1777,7 +1777,7 @@ class TestRetryAfterCap:
             # Break out of the backoff sleep immediately rather than blocking
             # for the full Retry-After window.
             if status_marker in msg:
-                agent._interrupt_requested = True
+                agent.hard_interrupt()
             return original_buffer(msg, *args, **kwargs)
 
         def _capture_emit(msg):
@@ -2425,6 +2425,50 @@ class TestMcpParallelToolBatch:
 
 
 class TestHandleMaxIterations:
+    def test_interrupted_summary_aborts_request_local_client_without_retry(self, agent):
+        entered = threading.Event()
+        aborted = threading.Event()
+        request_client = MagicMock()
+
+        def blocked_create(**_kwargs):
+            entered.set()
+            assert aborted.wait(5), "summary request was not aborted"
+            raise RuntimeError("socket closed")
+
+        request_client.chat.completions.create.side_effect = blocked_create
+        agent._create_request_openai_client = MagicMock(return_value=request_client)
+        agent._abort_request_openai_client = MagicMock(side_effect=lambda *_args, **_kwargs: aborted.set())
+        agent._close_request_openai_client = MagicMock()
+        agent._cached_system_prompt = "You are helpful."
+        outcome = {}
+
+        def run_summary():
+            try:
+                agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 60)
+            except BaseException as exc:
+                outcome["error"] = exc
+
+        with patch("agent.relay_llm.complete_logical_call") as complete_logical:
+            worker = threading.Thread(target=run_summary)
+            worker.start()
+            try:
+                assert entered.wait(5), "summary request did not start"
+                agent._interrupt_requested = True
+                worker.join(timeout=5)
+                assert not worker.is_alive(), "summary request did not stop promptly"
+            finally:
+                aborted.set()
+                agent._interrupt_requested = False
+                worker.join(timeout=5)
+
+        assert isinstance(outcome.get("error"), InterruptedError)
+        agent._create_request_openai_client.assert_called_once()
+        agent._abort_request_openai_client.assert_called_once_with(request_client, reason="interrupt_abort")
+        assert request_client.chat.completions.create.call_count == 1
+        agent.client.chat.completions.create.assert_not_called()
+        complete_logical.assert_called_once()
+        assert complete_logical.call_args.kwargs == {"outcome": "cancelled"}
+
     def test_summary_notice_uses_safe_print(self, agent):
         agent._print_fn = lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("closed"))
         agent.client.chat.completions.create.return_value = _mock_response(content="Summary")

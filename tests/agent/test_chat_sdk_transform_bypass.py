@@ -131,8 +131,7 @@ def test_auxiliary_completion_path_hands_the_sdk_only_the_placeholder(monkeypatc
 
 
 def test_iteration_summary_path_hands_the_sdk_only_the_placeholder(monkeypatch):
-    """The iteration-limit summary builds the full main-loop kwargs (``_build_api_kwargs``) and calls
-    ``chat.completions.create`` itself — the same multi-MB payload, so the same bypass."""
+    """The request-local summary path preserves the main-loop SDK transform bypass."""
     from agent import chat_completion_helpers
 
     seen = _capture_sdk_create(monkeypatch)
@@ -141,8 +140,13 @@ def test_iteration_summary_path_hands_the_sdk_only_the_placeholder(monkeypatch):
     transport = types.SimpleNamespace(normalize_response=lambda response, **kw: types.SimpleNamespace(content="ok", tool_calls=None))
     agent = types.SimpleNamespace(
         provider="p", model="m", api_mode="chat_completions", _force_ascii_payload=False,
-        _build_api_kwargs=lambda messages: dict(body), _ensure_primary_openai_client=lambda reason: client,
-        _get_transport=lambda: transport)
+        _build_api_kwargs=lambda messages: dict(body), _get_transport=lambda: transport,
+        _compute_non_stream_stale_timeout=lambda _kwargs: 30,
+        _create_request_openai_client=lambda **_kwargs: client,
+        _close_request_openai_client=lambda *_args, **_kwargs: None,
+        _abort_request_openai_client=lambda *_args, **_kwargs: None,
+        _touch_activity=lambda *_args: None, _emit_wait_notice=lambda *_args: None,
+        _interrupt_requested=False)
 
     assert chat_completion_helpers._chat_summary_attempt(agent, body["messages"], "req-1")(0) == "ok"
     assert len(seen) == 1

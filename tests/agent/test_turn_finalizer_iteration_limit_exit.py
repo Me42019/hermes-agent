@@ -114,18 +114,37 @@ def _finalize(
     )
 
 
+def test_interrupted_iteration_summary_stays_interrupted_and_skips_review(monkeypatch):
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = _LimitAgent()
+    agent._handle_max_iterations = MagicMock(
+        side_effect=InterruptedError("summary stopped")
+    )
+    agent._spawn_background_review = MagicMock()
+    agent._emit_diagnostic_status = MagicMock()
 
+    result = finalize_turn(
+        agent,
+        final_response=None,
+        api_call_count=60,
+        interrupted=False,
+        failed=False,
+        messages=[{"role": "user", "content": "task"}],
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="task",
+        original_user_message="task",
+        _should_review_memory=True,
+        _turn_exit_reason="unknown",
+    )
 
-
-
-
-
-
-
-
-
-
-
+    agent._handle_max_iterations.assert_called_once()
+    assert result["interrupted"] is True
+    assert result["completed"] is False
+    assert result["final_response"] is None
+    assert result["turn_exit_reason"] == "interrupted_by_user"
+    agent._spawn_background_review.assert_not_called()
 
 
 @pytest.mark.parametrize(

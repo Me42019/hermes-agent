@@ -2260,10 +2260,9 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
     sanitize_outbound_kwargs(agent, summary_kwargs)
 
     def _attempt(retry_count: int) -> str:
-        summary_client = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary")
         response = _managed_summary_call(
             agent, api_request_id, summary_kwargs,
-            lambda request: summary_client.chat.completions.create(**bypass_chat_sdk_request_transform(request, summary_client)),
+            lambda request: interruptible_api_call(agent, request),
             retry_count=retry_count)
         return _summary_text(agent, response)
     return _attempt
@@ -2300,7 +2299,11 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
         final_response = _EMPTY_SUMMARY_RESPONSE
         for retry_count in (0, 1):
+            if getattr(agent, "_interrupt_requested", False):
+                raise InterruptedError("Agent interrupted during iteration summary")
             text = attempt(retry_count)
+            if getattr(agent, "_interrupt_requested", False):
+                raise InterruptedError("Agent interrupted during iteration summary")
             if not text:
                 continue
             if "<think>" in text:
@@ -2311,6 +2314,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 final_response = text
             break
 
+    except InterruptedError:
+        summary_call_outcome = "cancelled"
+        raise
     except Exception as e:
         logger.warning("Failed to get summary response: %s", e)
         from agent.turn_failure_copy import site_copy
