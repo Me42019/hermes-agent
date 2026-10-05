@@ -41,6 +41,7 @@ class ToolRoundVerdict:
     truncated_tool_call_retries: Any
     current_turn_user_idx: Any
     result: Optional[Dict[str, Any]] = None
+    interrupted: bool = False
 
 
 def run_tool_round(
@@ -49,6 +50,7 @@ def run_tool_round(
     system_message: Any, active_system_prompt: Any, compression_attempts: Any,
     max_compression_attempts: Any, final_response: Any, failed: Any, _turn_exit_reason: Any,
     truncated_tool_call_retries: Any, current_turn_user_idx: Any,
+    interrupted: bool = False,
 ) -> ToolRoundVerdict:
     """Execute one tool round in the exact original order. Persist-before-execute is a
     durability invariant: resume must see the executed block if a destructive tool restarts
@@ -63,6 +65,7 @@ def run_tool_round(
             final_response=final_response, failed=failed, _turn_exit_reason=_turn_exit_reason,
             truncated_tool_call_retries=truncated_tool_call_retries,
             current_turn_user_idx=current_turn_user_idx, result=result,
+            interrupted=interrupted,
         )
 
     if not agent.quiet_mode:
@@ -153,12 +156,24 @@ def run_tool_round(
 
     agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
+    if agent._interrupt_requested:
+        # Stop before post-tool compression or budget-summary generation, including
+        # a handoff on the very last iteration (which never reaches begin_iteration).
+        from agent.interrupt_control import interrupt_issuer
+
+        interrupted = True
+        issuer = interrupt_issuer(agent)
+        _turn_exit_reason = f"interrupted_by_system({issuer})" if issuer else "interrupted_by_user"
+
     if getattr(agent, "_incremental_persistence_failed", False):
         # Tool result could not be made canonical: never send the in-memory result to
         # the model or project later events from this turn.
         _turn_exit_reason = "session_persistence_failed"
         final_response = ""
         failed = True
+        return _verdict("break")
+
+    if interrupted:
         return _verdict("break")
 
     if agent._tool_guardrail_halt_decision is not None:
