@@ -5401,6 +5401,7 @@ def _resolve_registry_branch(req: _ResolveRequest) -> _ResolveResult:
         # (tokens live ~15 min; the Anthropic SDK re-invokes the provider each request).
         try:
             from agent.anthropic_adapter import build_anthropic_client
+            from agent.anthropic_credentials import anthropic_route_is_oauth
             from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
         except ImportError:
             return None, None
@@ -5423,7 +5424,12 @@ def _resolve_registry_branch(req: _ResolveRequest) -> _ResolveResult:
             real_client = build_anthropic_client(token_provider, base_url)
         except ImportError:
             return None, None
-        client = AnthropicAuxiliaryClient(real_client, final_model, token_provider, base_url, is_oauth=True)
+        # OAuth identity only for native api.anthropic.com routes (#114967): MiniMax is a
+        # third-party Anthropic-protocol host, so no Claude Code tool-name wire
+        # transforms / identity rewrites / response prefix stripping here.
+        client = AnthropicAuxiliaryClient(
+            real_client, final_model, token_provider, base_url,
+            is_oauth=anthropic_route_is_oauth(base_url, token_provider))
         return _route_client(req, client, final_model)
     elif auth_type in {"oauth_device_code", "oauth_external"}:
         # nous / openai-codex / xai-oauth already returned from their explicit branches.
