@@ -29,6 +29,26 @@ _TERMINAL_KANBAN_TOOLS = frozenset({
 _DEFAULT_MAX_ATTEMPTS = 2
 
 
+def yield_after_kanban_handoff(agent, tool_name: str, args: dict) -> None:
+    """Yield only the dispatcher owner whose native lifecycle transition closed its run.
+
+    Called after the result's persistence attempt, never from the handler's tool thread:
+    interrupting there could abandon the successful result before it is committed.
+    """
+    tid = owned_kanban_task()
+    if tool_name not in _TERMINAL_KANBAN_TOOLS or not tid or (args.get("task_id") or tid) != tid:
+        return
+    from tools.kanban_tools import _board, _worker_run_id
+
+    run_id = _worker_run_id(tid)
+    if run_id is None:
+        return
+    with _board(args.get("board"), quiet_close=True) as (kb, conn):
+        status = kb.goal_run_status(conn, tid, run_id)
+    if status in {"done", "blocked", "review", "changes_requested"}:
+        agent.interrupt(hard_cancel=True, tool_reason="kanban handoff")
+
+
 def kanban_stop_nudge_enabled() -> bool:
     """On when ``HERMES_KANBAN_TASK`` is set for the dispatcher-owned worker, unless
     ``HERMES_KANBAN_STOP_NUDGE`` disables it. In-process delegate_task children and cron runs

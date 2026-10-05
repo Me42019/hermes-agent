@@ -1110,7 +1110,12 @@ def _commit_tool_result(
         except Exception as callback_error:
             logging.debug("Tool result metadata callback error: %s", callback_error)
     messages.append(tool_message)
-    if not _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}"):
+    persisted = _flush_session_db_after_tool_progress(agent, messages, stage=f"tool result {function_name}")
+    if not blocked:
+        from agent.kanban_stop import yield_after_kanban_handoff
+
+        yield_after_kanban_handoff(agent, function_name, function_args)
+    if not persisted:
         return None
 
     if not blocked:

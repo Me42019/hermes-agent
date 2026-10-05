@@ -1516,6 +1516,24 @@ def check_respawn_guard(
     if row is None:
         return None
 
+    # The transition clears tasks.worker_pid before its process has unwound.
+    # Retained run provenance is the native serialization fence for both lanes;
+    # reaping remains the delayed fallback for a worker that fails to exit.
+    prior_workers = conn.execute(
+        "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL AND worker_pid IS NOT NULL",
+        (task_id,),
+    ).fetchall()
+    for prior in prior_workers:
+        if not str(prior["claim_lock"] or "").startswith(_kb._host_prefix()):
+            continue
+        pid, fingerprint = prior["worker_pid"], prior["worker_started_at"]
+        if _kb._pid_alive(pid) and (
+            fingerprint is None or fingerprint == UNVERIFIED_WORKER_FINGERPRINT
+            or _process_fingerprint(int(pid)) is None or _worker_alive(pid, fingerprint)
+        ):
+            return "previous_worker_unwinding"
+
     now = int(time.time())
 
     # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.

@@ -586,6 +586,9 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     seen = _comment_watermark.get(tid)
     try:
         with _board(None, quiet_close=True) as (kb, conn):
+            run_id = _worker_run_id(tid)
+            if run_id is not None and kb.goal_run_status(conn, tid, run_id) != "running":
+                return False
             rows = kb.list_comments_after(conn, tid, after_id=seen or 0)
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
