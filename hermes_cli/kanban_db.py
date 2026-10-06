@@ -732,6 +732,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    review_required: bool = False  # Derived from native events, never a tasks column.
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -747,6 +748,7 @@ class Task:
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
             skills=skills_value,
+            review_required=bool(g("review_required")),
             goal_mode=bool(g("goal_mode")),
             block_recurrences=int(g("block_recurrences") or 0),
         )
@@ -1260,11 +1262,14 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    review_required: bool = False,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
     Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
+    ``review_required`` persists a native event marker; only a designated independent
+    review run or explicit audited operator recovery can subsequently complete.
     ``idempotency_key``: an existing non-archived task with the key is returned
     instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
@@ -1279,6 +1284,8 @@ def create_task(
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
 
+    if not isinstance(review_required, bool):
+        raise ValueError("review_required must be a boolean")
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1323,6 +1330,10 @@ def create_task(
             "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
+            from hermes_cli.kanban_review_policy import is_review_required
+
+            if review_required and not is_review_required(conn, row["id"]):
+                raise ValueError("idempotency key already names a task without required review")
             return row["id"]
 
     now = int(time.time())
@@ -1394,6 +1405,8 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                if review_required:
+                    _append_event(conn, task_id, "review_required", {"required": True})
                 if task_status == "blocked":
                     _append_event(
                         conn,
@@ -1492,7 +1505,11 @@ def _inherit_notify_subs(
 
 
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
-    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    row = conn.execute(
+        "SELECT *, EXISTS(SELECT 1 FROM task_events e WHERE e.task_id = tasks.id "
+        "AND e.kind = 'review_required') AS review_required FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
     return Task.from_row(row) if row else None
 
 
@@ -1519,7 +1536,8 @@ def list_tasks(
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
-    query = "SELECT * FROM tasks WHERE 1=1"
+    query = ("SELECT *, EXISTS(SELECT 1 FROM task_events e WHERE e.task_id = tasks.id "
+             "AND e.kind = 'review_required') AS review_required FROM tasks WHERE 1=1")
     params: list[Any] = []
     for col, val in (
         ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
@@ -2725,6 +2743,8 @@ def complete_task(
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True, force: bool = False,
+    review_override_reason: Optional[str] = None,
+    review_override_actor: Optional[str] = None, review_override_source: Optional[str] = None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2742,8 +2762,16 @@ def complete_task(
     or ``summary``, or a stripped result already stored on the card. Empty or
     whitespace-only evidence raises :class:`EmptyCompletionError` after an
     auditable event. Approving a card out of ``review`` stays exempt.
+    Opted-in required review additionally requires the owned designated review run.
+    Operator recovery needs ``force`` plus review_override_reason/actor/source;
+    worker contexts cannot use that recovery convention.
     """
     now = int(time.time())
+    from hermes_cli.kanban_review_policy import authorize_completion
+
+    authority_args = dict(force=force, override_reason=review_override_reason,
+                          override_actor=review_override_actor, override_source=review_override_source)
+    authorize_completion(conn, task_id, expected_run_id, **authority_args)
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
@@ -2762,6 +2790,7 @@ def complete_task(
         # reopened while this task waited.
         if not _parents_satisfied(conn, task_id):
             return False
+        review_authority = authorize_completion(conn, task_id, expected_run_id, **authority_args)
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
             return False
         trow = conn.execute(
@@ -2811,9 +2840,12 @@ def complete_task(
         event_summary = handoff_summary
         if prior_status == "review" and not event_summary:
             event_summary = _REVIEW_APPROVED_NOTE
+        event_payload = _completed_event_payload(result, event_summary, verified_cards, metadata)
+        if review_authority is not None:
+            event_payload["review_authority"] = review_authority
         _append_event(
             conn, task_id, "completed",
-            _completed_event_payload(result, event_summary, verified_cards, metadata),
+            event_payload,
             run_id=run_id,
         )
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
@@ -3424,6 +3456,12 @@ def request_review(
                 implementer = arow["profile"] if arow else None
             if implementer is None and trow["assignee"] != reviewer:
                 implementer = trow["assignee"]
+            from hermes_cli.kanban_review_policy import validate_handoff
+
+            try:
+                validate_handoff(conn, task_id, reviewer, implementer)
+            except ValueError as exc:
+                return _ret(False, str(exc))
             assignee_sql = ", assignee = ?" if reviewer is not None else ""
             run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
             params: tuple[Any, ...] = (
@@ -3992,6 +4030,9 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     now = int(time.time())
     lines: list[str] = []
     _ctx_header(lines, task)
+    if task.review_required:
+        lines.append("Review required: implementation must request an independent reviewer; "
+                     "only the designated native review run may complete this task.")
     _ctx_attachments(lines, list_attachments(conn, task_id))
     _ctx_prior_attempts(lines, conn, task_id, now)
     _ctx_parent_results(lines, conn, task_id, now)
@@ -4290,6 +4331,9 @@ def _retention_seconds(older_than_seconds: int) -> int:
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
     """Prune old done/archived events, retaining decomposition identity until task deletion.
 
+    Review-required histories remain until task deletion: policy, claim origins,
+    implementers and reviewer audit must still authorize reopened tasks.
+
     ``older_than_seconds=0`` means everything older than now; the CLI maps
     ``--event-retention-days 0`` to "disabled" before calling this.
     """
@@ -4297,7 +4341,9 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND kind != 'decomposed' AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
+            "(SELECT id FROM tasks WHERE status IN ('done', 'archived')) "
+            "AND NOT EXISTS (SELECT 1 FROM task_events policy "
+            "WHERE policy.task_id = task_events.task_id AND policy.kind = 'review_required')", (cutoff,),
         )
     return int(cur.rowcount or 0)
 

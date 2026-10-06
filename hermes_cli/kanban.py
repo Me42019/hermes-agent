@@ -373,6 +373,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             completion_contract=getattr(args, "completion_contract", None),
+            review_required=bool(getattr(args, "review_required", False)),
             initial_status=getattr(args, "initial_status", "running"),
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
@@ -524,6 +525,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             print(f"  max-retries: {int(cfg_val)} (config kanban.failure_limit)")
         else:
             print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
+    field("review-required", str(task.review_required).lower())
     field("created", f"{_fmt_ts(task.created_at)} by {task.created_by or '-'}")
 
     # Diagnostics up top so CLI users see distress signals before scrolling.
@@ -906,6 +908,8 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(raw_meta)
     if rc:
         return rc
+    from hermes_cli.kanban_review_policy import ReviewRequiredError
+
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
@@ -920,7 +924,12 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
                                         expected_run_id=_worker_run_id_for(tid),
-                                        force=bool(getattr(args, "force", False)))
+                                        force=bool(getattr(args, "force", False)),
+                                        review_override_reason=getattr(args, "override_review", None),
+                                        review_override_actor=_profile_author(), review_override_source="cli")
+            except ReviewRequiredError as exc:
+                fail_msg[tid] = f"cannot complete {tid}: {exc}"
+                return False
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
                                  f"worker, `hermes kanban reclaim {tid}` to release it, or re-run with "

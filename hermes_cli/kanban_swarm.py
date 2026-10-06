@@ -81,6 +81,12 @@ def _activate_root_inline(
     would run while the outer txn can still roll back). The caller runs
     ``recompute_ready`` after the outer commit.
     """
+    from hermes_cli.kanban_review_policy import authorize_completion
+
+    # An idempotency key may reuse an opted-in card; topology activation is
+    # not independent review authority. Share the same guard under this txn.
+    authorize_completion(conn, root_id, None, force=False, override_reason=None,
+                         override_actor=None, override_source=None)
     cur = conn.execute(
         """
         UPDATE tasks
