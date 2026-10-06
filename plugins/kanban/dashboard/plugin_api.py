@@ -390,6 +390,7 @@ def get_task(
 # --- POST /tasks ------------------------------------------------------------
 
 class CreateTaskBody(BaseModel):
+    review_required: bool = False
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
@@ -507,6 +508,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # --- PATCH /tasks/:id  and  POST /tasks/bulk ---------------------------------
 
 class UpdateTaskBody(BaseModel):
+    review_override_reason: Optional[str] = None
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -528,6 +530,7 @@ class UpdateTaskBody(BaseModel):
 
 
 class BulkTaskBody(BaseModel):
+    review_override_reason: Optional[str] = None
     ids: list[str]
     status: Optional[str] = None
     assignee: Optional[str] = None  # "" or None = unassign
@@ -569,7 +572,9 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
 # detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
 _STATUS_HANDLERS: dict[str, Any] = {
     "done": lambda conn, tid, p: kanban_db.complete_task(
-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
+        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True,
+        review_override_reason=p.review_override_reason, review_override_actor="dashboard",
+        review_override_source="dashboard"),
     "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
     "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
     "review": lambda conn, tid, p: kanban_db.request_review(
